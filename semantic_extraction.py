@@ -1,0 +1,120 @@
+import pandas as pd
+import json
+import ollama
+import time
+
+class OllamaSemanticNetworkExtractor:
+    def __init__(self, csv_filepath, model_name="llama3.1"):
+        self.csv_filepath = csv_filepath
+        self.model_name = model_name
+        self.triplets = []
+        
+        # We maintain the strict system prompt to constrain the local model's output
+        self.system_prompt = """
+        You are an expert data extraction algorithm. Read academic abstracts and extract 
+        relationships regarding Generative AI in marketing as Knowledge Graph triplets: 
+        [Source, Relationship, Target].
+        
+        Rules:
+        1. Only extract relationships involving AI tools, marketing workflows, human roles, or skills.
+        2. Keep nodes (Source/Target) concise (1-3 words).
+        3. The Relationship MUST be a single, lower-case verb from this approved list: 
+           [automates, augments, replaces, requires, creates, improves, threatens, analyses].
+           If none fit perfectly, choose the closest match.
+        4. Output strictly in JSON format.
+        
+        Expected JSON Schema:
+        {
+            "relationships": [
+                {"source": "node_name", "relationship": "verb", "target": "node_name"}
+            ]
+        }
+        """
+
+    def process_abstract(self, abstract):
+        """Sends the abstract to the local Ollama model for structured extraction."""
+        if pd.isna(abstract) or len(str(abstract)) < 50:
+            return []
+
+        try:
+            # We use the native ollama Python library
+            response = ollama.chat(
+                model=self.model_name,
+                messages=[
+                    {'role': 'system', 'content': self.system_prompt},
+                    {'role': 'user', 'content': f"Extract relationships from this abstract: {abstract}"}
+                ],
+                format='json', # Forces the model to output valid JSON
+                options={
+                    'temperature': 0.0 # Zero temperature for maximum determinism
+                }
+            )
+            
+            # Parse the text response into a Python dictionary
+            content = response['message']['content']
+            data = json.loads(content)
+            return data.get("relationships", [])
+            
+        except json.JSONDecodeError:
+            # Local models sometimes hallucinate text outside the JSON block.
+            # This catches those errors so the script doesn't crash.
+            print("   [!] The model failed to return valid JSON. Skipping this abstract.")
+            return []
+        except Exception as e:
+            print(f"   [!] Error during local extraction: {e}")
+            return []
+
+    def build_semantic_network(self, sample_size=None):
+        """Iterates through the dataset and extracts semantic triplets locally."""
+        print(f"Loading dataset for local extraction using {self.model_name}...")
+        try:
+            df = pd.read_csv(self.csv_filepath)
+        except Exception as e:
+            print(f"Error reading CSV: {e}")
+            return
+
+        if sample_size:
+            df = df.head(sample_size)
+            print(f"Processing a sample of {sample_size} abstracts...")
+
+        # Track the start time to calculate how fast your machine processes the text
+        start_time = time.time()
+
+        for index, row in df.iterrows():
+            abstract = row.get('Abstract', '')
+            title = row.get('Title', 'Unknown')
+            
+            print(f"Processing abstract {index + 1}/{len(df)}...")
+            
+            extracted_rels = self.process_abstract(abstract)
+            
+            for rel in extracted_rels:
+                rel['source_paper_title'] = title
+                self.triplets.append(rel)
+
+        end_time = time.time()
+        duration = round(end_time - start_time, 2)
+        
+        print(f"\nExtraction complete in {duration} seconds.")
+        print(f"Found {len(self.triplets)} semantic relationships.")
+
+    def export_data(self, filename="ollama_semantic_network_generative_AI_marketing.csv"):
+        """Exports the structured triplets to a CSV."""
+        if not self.triplets:
+            print("No data to export.")
+            return
+            
+        df_export = pd.DataFrame(self.triplets)
+        df_export.to_csv(filename, index=False)
+        print(f"Semantic network data exported to {filename}")
+
+# --- Execution ---
+if __name__ == "__main__":
+    # Ensure Ollama is running before executing this script
+    CSV_FILE = "generative AI marketing.csv"
+    
+    extractor = OllamaSemanticNetworkExtractor(CSV_FILE, model_name="llama3.1")
+    
+    # Process the first 5 rows to test your local hardware's speed
+    extractor.build_semantic_network(sample_size=700)
+    extractor.export_data()
